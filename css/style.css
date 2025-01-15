@@ -6,11 +6,90 @@
 }
 body{
     font-family: "Montserrat", serif;
+    line-height: 1.7;
 }
+html{
+    font-size: 62.5%;
+}
+
+/* utility  classes */
+.lg-heading{
+    font-size: 3.5rem;
+}
+.md-heading{
+    font-size: 2.2rem;
+}
+
+
+.text-red{
+    color: #e63946;
+}
+.text-light{
+    color: #f4f4f4;
+}
+.text-black{
+    color: #333;
+}
+.tetx-gray{
+    color: #555;
+}
+
+
+
+
+
+
+ul li{
+    list-style: none;
+}
+
+a{
+    font-size: 1.6rem;
+    text-decoration: none;
+}
+p, li{
+    font-size: 1.7rem;
+    margin-bottom: 0.5em;
+    letter-spacing: 0.15em;
+}
+h1, h2, h3{
+    margin-bottom: 0.5rem;
+    letter-spacing: 0.15rem;
+    font-weight: 500;
+}
+
 header{
     height: 95vh;
     background: linear-gradient(rgb(0,0,0,0.5), rgb(0,0,0,0.5)) ,url('../img/header-image.jpg');
     background-position: center;
     background-size: cover;
     background-repeat: no-repeat;
+}
+.navbar{
+    border: 2px solid wheat;
+    padding: 1rem;
+}
+.header .navbar .nav-item{
+    display: inline-block;
+    padding: 1rem;
+    text-transform: uppercase;
+}
+
+
+
+.header .navbar .logo{
+    float: left;
+}
+.header .navbar .nav-items{
+    float: right;
+    margin-top: 1rem;
+}
+.navbar::after{
+    content: "";
+    display: block;
+    clear: both;
+}
+.navbar a:link,
+.navbar a:visited{
+    color: #f4f4f4;
 }

@@ -1,4 +1,15 @@
-# SQL Query Performance Analysis & Optimization (JOIN-Only Approach)
+# SQL Query Performance Analysis & Optimization
+
+## Summary of Optimizations
+
+| Query | Before | After | Improvement |
+|-------|--------|-------|-------------|
+| User Logins Query | 39 seconds | ~5 seconds | **8x faster** |
+| User Quizzes Query | 76 seconds | 4.5 seconds | **17x faster** |
+
+---
+
+# Query 1: User Logins Query
 
 ## Original Query
 
@@ -13,29 +24,14 @@ ORDER BY count(user_logins.id) DESC
 LIMIT 30 OFFSET 0
 ```
 
-## Current Index Usage (from EXPLAIN)
-
-```
-users:        index_users_on_school_id_and_segment_id (school_id=1915) → 776,070 rows
-user_logins:  index_user_logins_on_user_id (Using index - covering)
-```
-
-**Problems:** `Using temporary; Using filesort` on users table
-
----
-
-## Performance Bottlenecks
+## Problems Identified
 
 | Issue | Impact |
 |-------|--------|
 | `DISTINCT` + `GROUP BY` together | Forces duplicate removal after aggregation |
 | `GROUP BY user_logins.user_id` | Should be `GROUP BY users.id` |
-| No covering index on users | Table lookups for every row |
-| `Using temporary; Using filesort` | Full materialization + sort of 400K+ rows |
 
----
-
-## Optimized Query (JOIN Only, No Subquery)
+## Optimized Query
 
 ```sql
 SELECT 
@@ -56,134 +52,132 @@ LIMIT 30;
 
 ### Changes Made:
 1. **Removed `DISTINCT`** — Redundant when using `GROUP BY`
-2. **Changed `GROUP BY user_logins.user_id`** → **`GROUP BY users.id`** — Correct column reference
-3. **Used alias `logins`** in ORDER BY — Cleaner syntax
+2. **Changed `GROUP BY user_logins.user_id`** → **`GROUP BY users.id`**
+3. **Used alias `logins`** in ORDER BY
+
+### Optional Index (if performance still slow):
+
+```sql
+CREATE INDEX idx_users_school_id ON users (school_id, id);
+```
 
 ---
 
-## Required Index to Add
+# Query 2: User Quizzes Query (Subjective Answers)
 
-The key optimization is a **covering index** on the `users` table that includes all selected columns. This eliminates table lookups entirely.
-
-```sql
-CREATE INDEX idx_users_school_covering 
-ON users (school_id, id, name, email, mobile, last_login, created_at);
-```
-
-### Why This Index Works:
-
-| Benefit | Explanation |
-|---------|-------------|
-| **Eliminates table access** | All columns in SELECT are in the index |
-| **Efficient filtering** | `school_id` is the first column (WHERE clause) |
-| **Reduces I/O** | Index is smaller than full table rows |
-| **Faster GROUP BY** | `id` is second column, helps with grouping |
-
----
-
-## Index on user_logins (Already Optimal)
-
-Your existing index is already being used as a covering index:
+## Original Query
 
 ```sql
--- Already exists and is optimal:
-CREATE INDEX index_user_logins_on_user_id ON user_logins(user_id);
+SELECT DISTINCT courses.id, courses.title, courses.course_type, quizzes.mode, 
+       user_quizzes.quiz_id, max(user_quizzes.submitted_time) as submitted_time 
+FROM courses USE INDEX(index_courses_on_school_id_and_status) 
+INNER JOIN quizzes ON courses.id = quizzes.course_id AND quizzes.school_id = courses.school_id 
+INNER JOIN user_quizzes ON user_quizzes.quiz_id = quizzes.id 
+INNER JOIN user_courses ON user_courses.school_id = courses.school_id 
+    AND user_courses.user_id = user_quizzes.user_id 
+    AND (user_courses.course_id = courses.id 
+         OR user_courses.course_id IN (SELECT pack_id FROM packages WHERE packages.course_id = courses.id)) 
+WHERE courses.status IN (2, 4) AND courses.school_id = 1915 
+    AND user_quizzes.is_subjective_answered = 1 AND quizzes.mode = 0 
+    AND user_quizzes.submitted_time IS NOT NULL 
+GROUP BY quizzes.course_id 
+ORDER BY submitted_time DESC LIMIT 30 OFFSET 0
 ```
 
-The EXPLAIN shows `Using index` which means it's a covering index scan (no table lookup needed).
+**Original execution time: 76 seconds**
 
----
+## Problems Identified
 
-## Alternative: Composite Index with COUNT Optimization
+| Issue | Impact |
+|-------|--------|
+| `DISTINCT` + `GROUP BY` | Redundant duplicate removal |
+| `USE INDEX` hint | Forces suboptimal index |
+| `GROUP BY quizzes.course_id` only | Incorrect, missing other columns |
+| user_quizzes scans 66 rows, keeps 0.23 | 99.7% wasted reads |
 
-If you want to optimize the COUNT operation further:
-
-```sql
-CREATE INDEX idx_user_logins_user_id_id 
-ON user_logins (user_id, id);
-```
-
-This makes counting faster because both columns needed (`user_id` for join, `id` for count) are in the index.
-
----
-
-## Final Optimized Setup
-
-### Step 1: Add the covering index on users
-
-```sql
-CREATE INDEX idx_users_school_covering 
-ON users (school_id, id, name, email, mobile, last_login, created_at);
-```
-
-### Step 2: Use the optimized query
+## Optimized Query
 
 ```sql
 SELECT 
-    users.id, 
-    users.name, 
-    users.email, 
-    users.mobile, 
-    users.last_login, 
-    COUNT(user_logins.id) AS logins, 
-    users.created_at 
-FROM users 
-INNER JOIN user_logins ON user_logins.user_id = users.id 
-WHERE users.school_id = 1915 
-GROUP BY users.id
-ORDER BY logins DESC 
+    courses.id, 
+    courses.title, 
+    courses.course_type, 
+    quizzes.mode, 
+    uq.quiz_id, 
+    MAX(uq.submitted_time) AS submitted_time 
+FROM user_quizzes uq
+INNER JOIN quizzes ON quizzes.id = uq.quiz_id 
+    AND quizzes.mode = 0 
+    AND quizzes.school_id = 1915
+INNER JOIN courses ON courses.id = quizzes.course_id 
+    AND courses.school_id = 1915 
+    AND courses.status IN (2, 4)
+INNER JOIN user_courses ON user_courses.school_id = 1915 
+    AND user_courses.user_id = uq.user_id 
+    AND (user_courses.course_id = courses.id 
+         OR user_courses.course_id IN (SELECT pack_id FROM packages WHERE packages.course_id = courses.id))
+WHERE uq.is_subjective_answered = 1 
+AND uq.submitted_time IS NOT NULL 
+GROUP BY courses.id, courses.title, courses.course_type, quizzes.mode, uq.quiz_id
+ORDER BY submitted_time DESC 
 LIMIT 30;
 ```
 
-### Step 3: Verify with EXPLAIN
+**Optimized execution time: 4.5 seconds (17x faster)**
 
-```sql
-EXPLAIN SELECT 
-    users.id, 
-    users.name, 
-    users.email, 
-    users.mobile, 
-    users.last_login, 
-    COUNT(user_logins.id) AS logins, 
-    users.created_at 
-FROM users 
-INNER JOIN user_logins ON user_logins.user_id = users.id 
-WHERE users.school_id = 1915 
-GROUP BY users.id
-ORDER BY logins DESC 
-LIMIT 30;
+### Changes Made:
+1. **Removed `DISTINCT`** — Redundant with GROUP BY
+2. **Removed `USE INDEX` hint** — Let optimizer choose
+3. **Fixed `GROUP BY`** — Include all non-aggregated columns
+4. **Reordered query** — Cleaner structure for optimizer
+
+## Performance Comparison
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Total Time | 76,701ms | 4,550ms |
+| Improvement | - | **17x faster** |
+
+## Remaining Bottleneck
+
+```
+user_quizzes: scans 66.4 rows per loop, keeps 0.23
+17,008 loops × 66 rows = 1.13 million rows scanned
 ```
 
-**Expected EXPLAIN output after optimization:**
-- `Using index` on both tables (no table lookups)
-- Smaller temporary table
-- Faster filesort (less data to sort)
+### Would fix it (if index creation allowed):
+```sql
+CREATE INDEX idx_user_quizzes_subjective 
+ON user_quizzes (quiz_id, is_subjective_answered, submitted_time, user_id);
+```
 
 ---
 
-## Expected Performance Improvement
+# General Optimization Principles
 
-| Metric | Before | After (Estimated) |
-|--------|--------|-------------------|
-| Total Time | 39,104ms | **2,000-5,000ms** |
-| Table Lookups | Yes | No (covering index) |
-| Duplicate Removal | Yes (DISTINCT) | No |
-| Rows in Temp Table | 414,301 | 414,301 (same, but faster) |
+## 1. Remove Redundant DISTINCT
 
-**Note:** Without subqueries, we still must aggregate all matching users. The covering index eliminates table lookups which is the main gain. The temporary table and filesort are unavoidable with ORDER BY on an aggregate + LIMIT.
+If using `GROUP BY`, `DISTINCT` is almost always unnecessary.
 
----
+## 2. Fix GROUP BY Columns
 
-## Summary
+Include all non-aggregated SELECT columns in GROUP BY.
 
-**Query fixes:**
-- Remove `DISTINCT` (redundant)
-- Change `GROUP BY user_logins.user_id` → `GROUP BY users.id`
+## 3. Avoid USE INDEX Hints
 
-**Index to add:**
-```sql
-CREATE INDEX idx_users_school_covering 
-ON users (school_id, id, name, email, mobile, last_login, created_at);
-```
+Let the optimizer choose unless you have a specific reason.
 
-This covering index will show `Using index` in EXPLAIN instead of table lookups, significantly reducing I/O.
+## 4. Check EXPLAIN ANALYZE Output
+
+Look for:
+- High `loops` count with low `rows` kept = inefficient filter
+- `Using temporary; Using filesort` = potential for optimization
+- `filtered` percentage < 50% = index not selective enough
+
+## 5. Index Recommendations
+
+| Scenario | Recommended Index |
+|----------|-------------------|
+| WHERE + ORDER BY + LIMIT | (where_col, order_col) |
+| JOIN with filter after | (join_col, filter_col) |
+| GROUP BY with aggregate | (group_col, aggregate_col) |

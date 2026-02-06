@@ -2,8 +2,8 @@
 -- ORDER TRANSACTION DATA OPTIMIZATION
 -- =============================================================================
 -- This file documents the SQL query optimization for the order transactions
--- page. The original query fetched many columns and JOINs that are NOT used
--- by the frontend display.
+-- page. The original query fetched many columns that are NOT used by the
+-- frontend display.
 --
 -- Frontend displays ONLY these fields:
 --   Name, Mobile, PAN, PAN Status, Date of Birth, Product Title,
@@ -12,8 +12,11 @@
 --   User ID, Invoice Number, Invoice, Email
 --
 -- Billing Address, Shipping Address, and Place of Supply are already
--- fetched via BatchLoader in the GraphQL type, so the LEFT JOIN to
--- addresses in the SQL query was redundant.
+-- fetched via BatchLoader in the GraphQL type (not from the SQL JOIN).
+--
+-- NOTE: The LEFT JOINs to addresses and coupon_codes are KEPT because
+-- CUSTOM_FILTER_FIELDS in UserProductOrders uses them for filtering
+-- (state, country, tracking_code filters). Only SELECT columns were removed.
 -- =============================================================================
 
 -- =============================================================================
@@ -44,8 +47,8 @@
 --   `orders`.`home_currency_amount`,
 --   `orders`.`currency_code`,               -- REMOVED: not displayed on frontend
 --   `orders`.`product_pricing_id`,          -- REMOVED: not displayed on frontend
---   `addresses`.`state`,                    -- REMOVED: fetched via BatchLoader
---   `addresses`.`country`,                  -- REMOVED: fetched via BatchLoader
+--   `addresses`.`state`,                    -- REMOVED: fetched via BatchLoader in GraphQL
+--   `addresses`.`country`,                  -- REMOVED: fetched via BatchLoader in GraphQL
 --   `orders`.`user_consent_status`,
 --   `orders`.`consent_page_id`,             -- REMOVED: not displayed on frontend
 --   `orders`.`mrp`,                         -- REMOVED: not displayed on frontend
@@ -59,27 +62,20 @@
 --   orders.school_id as school_id,
 --   coupon_codes.code as tracking_code      -- REMOVED: not displayed on frontend
 -- FROM `orders`
---   left join courses on orders.course_id = courses.id and orders.school_id = courses.school_id
---   left join users on orders.user_id = users.id
---   left join coupon_codes on coupon_codes.id = orders.tracking_id     -- REMOVED: entire JOIN
---     and coupon_codes.school_id = orders.school_id
---     and coupon_codes.coupon_type = 1
---   left join addresses on addresses.user_id = orders.user_id          -- REMOVED: entire JOIN
---     and addresses.school_id = orders.school_id
---     and addresses.address_type = 0
---   inner join learner_invoices on learner_invoices.order_id = orders.id
---     and learner_invoices.school_id = orders.school_id
--- WHERE `orders`.`school_id` = 182652
---   AND `orders`.`transaction_status` = 2
---   AND `orders`.`type_of_payment` != 2
--- ORDER BY `orders`.`id` DESC
--- LIMIT 10 OFFSET 0
+--   left join courses on ...
+--   left join users on ...
+--   left join coupon_codes on ...           -- KEPT: needed for CUSTOM_FILTER_FIELDS
+--   left join addresses on ...              -- KEPT: needed for CUSTOM_FILTER_FIELDS
+--   inner join learner_invoices on ...
+-- WHERE ...
 
 -- =============================================================================
 -- OPTIMIZED QUERY (after optimization)
 -- =============================================================================
--- Removed 19 unnecessary SELECT columns
--- Removed 2 unnecessary LEFT JOINs (addresses, coupon_codes)
+-- Removed 18 unnecessary SELECT columns from DEFAULT_SELECT_FIELDS
+-- Removed 1 ALIAS_FIELD (coupon_codes.code as tracking_code)
+-- Removed .includes(:product_pricing) eager load
+-- Kept all JOINs (addresses & coupon_codes needed for CUSTOM_FILTER_FIELDS)
 -- =============================================================================
 
 SELECT DISTINCT
@@ -95,32 +91,40 @@ SELECT DISTINCT
   `orders`.`price`,
   `orders`.`home_currency_amount`,
   `orders`.`user_consent_status`,
+  -- (below only for INVOICES type)
   `learner_invoices`.`invoice_id`,
   `learner_invoices`.`invoice_file_name`,
   `learner_invoices`.`amount`,
   `learner_invoices`.`tax_amount`,
   `learner_invoices`.`is_sgst_cgst_order`,
+  -- alias fields
   users.id as user_id,
   orders.school_id as school_id
 FROM `orders`
   LEFT JOIN courses ON orders.course_id = courses.id
     AND orders.school_id = courses.school_id
   LEFT JOIN users ON orders.user_id = users.id
+  LEFT JOIN coupon_codes ON coupon_codes.id = orders.tracking_id
+    AND coupon_codes.school_id = orders.school_id
+    AND coupon_codes.coupon_type = 1
+  LEFT JOIN addresses ON addresses.user_id = orders.user_id
+    AND addresses.school_id = orders.school_id
+    AND addresses.address_type = 0
   INNER JOIN learner_invoices ON learner_invoices.order_id = orders.id
     AND learner_invoices.school_id = orders.school_id
-WHERE `orders`.`school_id` = 182652
+WHERE `orders`.`school_id` = ?
   AND `orders`.`transaction_status` = 2
   AND `orders`.`type_of_payment` != 2
 ORDER BY `orders`.`id` DESC
 LIMIT 10 OFFSET 0;
 
 -- =============================================================================
--- SUMMARY OF REMOVALS
+-- SUMMARY OF CHANGES
 -- =============================================================================
 --
--- COLUMNS REMOVED FROM SELECT (19 columns):
+-- 1. DEFAULT_SELECT_FIELDS: Removed 18 columns (30 → 12)
 -- +-----------------------------------------+------------------------------------------+
--- | Column                                  | Reason                                   |
+-- | Column Removed                          | Reason                                   |
 -- +-----------------------------------------+------------------------------------------+
 -- | users.profile_photo_file_name           | Not displayed on frontend                |
 -- | courses.course_type                     | Not displayed on frontend                |
@@ -140,27 +144,33 @@ LIMIT 10 OFFSET 0;
 -- | orders.consent_page_id                  | Not displayed on frontend                |
 -- | orders.mrp                              | Not displayed on frontend                |
 -- | orders.type_of_payment                  | Used in WHERE only, not displayed        |
--- | coupon_codes.code (tracking_code)       | Not displayed on frontend                |
 -- +-----------------------------------------+------------------------------------------+
 --
--- JOINS REMOVED (2 JOINs):
+-- 2. ALIAS_FIELDS: Removed 1 field (3 → 2)
 -- +-----------------------------------------+------------------------------------------+
--- | JOIN                                    | Reason                                   |
+-- | Alias Removed                           | Reason                                   |
 -- +-----------------------------------------+------------------------------------------+
--- | LEFT JOIN addresses                     | Redundant: billing/shipping/place of     |
--- |                                         | supply fetched via BatchLoader in        |
--- |                                         | GraphQL type                             |
--- | LEFT JOIN coupon_codes                  | Only fetched tracking_code which is      |
--- |                                         | not displayed on frontend                |
+-- | coupon_codes.code as tracking_code      | Not displayed on frontend                |
 -- +-----------------------------------------+------------------------------------------+
 --
--- GRAPHQL FIELDS REMOVED (23 fields):
+-- 3. JOINs: ALL KEPT (addresses & coupon_codes needed for filtering)
 -- +-----------------------------------------+------------------------------------------+
--- | Field                                   | Reason                                   |
+-- | JOIN                                    | Why Kept                                 |
+-- +-----------------------------------------+------------------------------------------+
+-- | LEFT JOIN addresses                     | CUSTOM_FILTER_FIELDS: state, country     |
+-- | LEFT JOIN coupon_codes                  | CUSTOM_FILTER_FIELDS: tracking_code      |
+-- +-----------------------------------------+------------------------------------------+
+--
+-- 4. Eager Loading: Removed .includes(:product_pricing)
+--    (product_pricing field removed from TransactionType)
+--
+-- 5. GraphQL TransactionType: Removed 23 fields
+-- +-----------------------------------------+------------------------------------------+
+-- | Field Removed                           | Reason                                   |
 -- +-----------------------------------------+------------------------------------------+
 -- | affiliate_payout                        | Not displayed on frontend                |
 -- | consent_page_id                         | Not displayed on frontend                |
--- | country                                 | Not displayed on frontend                |
+-- | country                                 | Not displayed (place_of_supply covers)   |
 -- | coupon_amount                           | Not displayed on frontend                |
 -- | coupon_code                             | Not displayed on frontend                |
 -- | course_id                               | Not displayed on frontend                |
@@ -183,26 +193,14 @@ LIMIT 10 OFFSET 0;
 -- | type_of_payment                         | Not displayed on frontend                |
 -- +-----------------------------------------+------------------------------------------+
 --
--- GRAPHQL METHODS/RESOLVERS REMOVED:
---   - country (BatchLoader) - not displayed
---   - has_installments - not displayed
---   - remaining_amount (BatchLoader) - not displayed
+-- 6. GraphQL Resolvers Removed:
+--    - country (BatchLoader) - not displayed
+--    - has_installments - not displayed
+--    - remaining_amount (BatchLoader) - not displayed
 --
--- ENUM_ATTRIBUTES REMOVED:
---   - payment_type -> Enums::Orders::PaymentTypeEnum
---   - transaction_status -> Enums::Orders::TransactionStatusEnum
---   - course_type -> Enums::Enrollments::ProductTypeEnum
---   - type_of_payment -> Enums::Orders::TypeOfPaymentEnum
+-- 7. ENUM_ATTRIBUTES Simplified (kept only user_consent_status):
+--    Removed: payment_type, transaction_status, course_type, type_of_payment
 --
--- IDENTIFIER_FIELDS REMOVED:
---   - username (not displayed on frontend, only email is needed)
---
--- COLUMNS KEPT (19 columns):
---   orders.id, users.name, users.mobile, users.pan, users.pan_status,
---   users.dob, users.email, courses.title, orders.created_at, orders.price,
---   orders.home_currency_amount, orders.user_consent_status,
---   learner_invoices.invoice_id, learner_invoices.invoice_file_name,
---   learner_invoices.amount, learner_invoices.tax_amount,
---   learner_invoices.is_sgst_cgst_order, users.id (as user_id),
---   orders.school_id (as school_id)
+-- 8. IDENTIFIER_FIELDS Simplified (kept only email):
+--    Removed: username
 -- =============================================================================

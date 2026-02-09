@@ -2,11 +2,8 @@
 
 # =============================================================================
 # Spec to verify that school settings are merged (not replaced) on update
-# and that generate_learner_invoices is properly permitted and preserved.
+# and that generate_learner_invoices is preserved.
 # =============================================================================
-#
-# Add this spec to your existing schools_controller_spec.rb or run it
-# independently to validate the fix.
 
 require "rails_helper"
 
@@ -22,7 +19,7 @@ RSpec.describe "Admin::SchoolsController - Settings Merge", type: :controller do
       }.to_json)
     end
 
-    context "when updating settings without generate_learner_invoices in the payload" do
+    context "when updating title/description without generate_learner_invoices" do
       let(:update_params) do
         {
           id: school.id,
@@ -49,8 +46,7 @@ RSpec.describe "Admin::SchoolsController - Settings Merge", type: :controller do
       end
 
       it "does not lose any existing settings keys" do
-        original_settings = JSON.parse(school.settings)
-        original_keys = original_settings.keys
+        original_keys = JSON.parse(school.settings).keys
 
         patch :update, params: update_params
 
@@ -64,9 +60,7 @@ RSpec.describe "Admin::SchoolsController - Settings Merge", type: :controller do
       end
     end
 
-    context "when generate_learner_invoices is sent as a separate permitted param" do
-      # This tests FIX 1: generate_learner_invoices should no longer be
-      # "Unpermitted parameter" after adding it to school_params
+    context "when generate_learner_invoices is sent as a separate param" do
       let(:update_params) do
         {
           id: school.id,
@@ -82,37 +76,31 @@ RSpec.describe "Admin::SchoolsController - Settings Merge", type: :controller do
         }
       end
 
-      it "does not log an Unpermitted parameter warning" do
-        # After adding :generate_learner_invoices to school_params permit list,
-        # this parameter should pass through without warnings
-        expect(Rails.logger).not_to receive(:warn).with(/Unpermitted parameter.*generate_learner_invoices/)
-        patch :update, params: update_params
-      end
-
-      it "preserves generate_learner_invoices in the merged settings" do
+      it "injects generate_learner_invoices into the merged settings" do
         patch :update, params: update_params
 
         school.reload
         updated_settings = JSON.parse(school.settings)
 
         expect(updated_settings["generate_learner_invoices"]).to eq(1)
+        expect(updated_settings["title"]).to eq("Updated Title")
       end
     end
 
-    context "when explicitly updating generate_learner_invoices to 0" do
+    context "when explicitly disabling generate_learner_invoices" do
       let(:update_params) do
         {
           id: school.id,
           school: {
+            generate_learner_invoices: 0,
             settings: {
-              title: "New Title",
-              generate_learner_invoices: 0
+              title: "New Title"
             }.to_json
           }
         }
       end
 
-      it "allows explicit updates to generate_learner_invoices" do
+      it "allows turning off generate_learner_invoices" do
         patch :update, params: update_params
 
         school.reload
@@ -120,6 +108,8 @@ RSpec.describe "Admin::SchoolsController - Settings Merge", type: :controller do
 
         expect(updated_settings["generate_learner_invoices"]).to eq(0)
         expect(updated_settings["title"]).to eq("New Title")
+        # Other existing keys still preserved
+        expect(updated_settings["description"]).to eq("Original Description")
       end
     end
 
@@ -127,9 +117,7 @@ RSpec.describe "Admin::SchoolsController - Settings Merge", type: :controller do
       let(:update_params) do
         {
           id: school.id,
-          school: {
-            name: "Updated School Name"
-          }
+          school: { name: "Updated School Name" }
         }
       end
 

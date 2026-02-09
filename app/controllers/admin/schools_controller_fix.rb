@@ -1,60 +1,79 @@
 # frozen_string_literal: true
 
+# =============================================================================
 # FIX: School Settings Invoice Generation Bug
+# =============================================================================
 #
 # Problem:
 # --------
 # When updating school settings (e.g., title, description) through the admin
-# schools controller, the entire `settings` JSON column is replaced with only
-# the incoming values. This causes previously saved settings like
-# `generate_learner_invoices` to be lost (reset to 0/null).
+# schools controller, the `generate_learner_invoices` setting is lost because:
 #
-# Example of the bug:
-#   Before update: settings = {"title":"test", "generate_learner_invoices":1}
-#   User updates title to "akshat123"
-#   After update:  settings = {"title":"akshat123","description":"aksaht123","favicon_url":null,"logo_url":null}
-#   => generate_learner_invoices is LOST
+#   1. `generate_learner_invoices` is sent as a separate parameter under
+#      `school` (school[generate_learner_invoices]) by the frontend.
 #
-# Root Cause:
-# -----------
-# The `settings` parameter is permitted as a scalar in `school_params`:
+#   2. It is NOT in the `school_params` permit list, so Rails strong
+#      parameters silently drops it:
+#        => "Unpermitted parameter: :generate_learner_invoices"
+#
+#   3. The `settings` JSON column is rebuilt from only the permitted form
+#      fields (title, description, favicon_url, logo_url), completely
+#      replacing the old JSON and losing generate_learner_invoices.
+#
+# Two fixes are needed:
+# ---------------------
+#
+#   FIX 1: Add :generate_learner_invoices to school_params permit list
+#          This stops the "Unpermitted parameter" warning and allows the
+#          value to pass through when explicitly sent from the frontend.
+#
+#   FIX 2: Merge incoming settings with existing settings in the update
+#          action, so keys not present in the current form submission
+#          are preserved from the database. This is a safety net that
+#          protects against ANY settings key being accidentally lost,
+#          not just generate_learner_invoices.
+#
+# =============================================================================
+
+# =============================================================================
+# FIX 1: Update school_params permit list
+# =============================================================================
+#
+# In app/controllers/admin/schools_controller.rb, add
+# :generate_learner_invoices to the permit call:
 #
 #   def school_params
-#     params.require(:school).permit(:name, :description, :settings, ...)
+#     params.require(:school).permit(
+#       :name, :description, :settings, :currency_type, :time_zone,
+#       :video_quality, :email_verification_days, :access_on_multiple_devices,
+#       :language, :logo_file_name, :favicon_file_name, :white_labled,
+#       :fb_link, :twitter_link, :linkedin_link, :gplus_link, :youtube_link,
+#       :android_link, :ios_link, :is_widgets_enabled, :is_otp_enabled, :tax,
+#       :is_billing_address_enabled, :is_shipping_address_enabled,
+#       :is_support_enabled, :is_receipt_selected, :telegram_link,
+#       :fps_cert_url, :instagram_link,
+#       :generate_learner_invoices,                    # <-- ADD THIS
+#       pricing_model_attributes: [:pricing_model]
+#     )
 #   end
-#
-# When the frontend sends a partial settings hash (e.g., only title/description),
-# it completely overwrites the existing settings JSON in the database instead
-# of merging with the existing values.
-#
-# Fix:
-# ----
-# Merge incoming settings with existing settings before saving. This ensures
-# that keys not present in the incoming payload (like `generate_learner_invoices`)
-# are preserved from the existing record.
-#
-# Apply one of the following approaches depending on your codebase structure:
 
-# ============================================================================
-# APPROACH 1: Fix in the Controller (Recommended)
-# ============================================================================
+# =============================================================================
+# FIX 2: Merge settings in the update action
+# =============================================================================
 #
-# In the `update` action of your SchoolsController, merge settings before update:
-#
-#   # app/controllers/admin/schools_controller.rb
+# In the `update` action, merge incoming settings with existing ones:
 #
 #   def update
 #     @school = School.find(params[:id])
 #
-#     merged_params = school_params
+#     update_params = school_params
 #
-#     # Merge incoming settings with existing settings to preserve keys
-#     # like generate_learner_invoices that may not be in the current form
-#     if merged_params[:settings].present?
-#       merged_params[:settings] = merge_school_settings(@school, merged_params[:settings])
+#     # Merge incoming settings with existing settings to preserve all keys
+#     if update_params[:settings].present?
+#       update_params[:settings] = merged_settings(@school, update_params[:settings])
 #     end
 #
-#     if @school.update(merged_params)
+#     if @school.update(update_params)
 #       # success handling
 #     else
 #       # error handling
@@ -63,42 +82,31 @@
 #
 #   private
 #
-#   def merge_school_settings(school, incoming_settings)
-#     existing_settings = school.settings.is_a?(String) ? JSON.parse(school.settings) : (school.settings || {})
-#     new_settings = incoming_settings.is_a?(String) ? JSON.parse(incoming_settings) : (incoming_settings || {})
+#   def merged_settings(school, incoming_settings)
+#     existing = parse_settings(school.settings)
+#     incoming = parse_settings(incoming_settings)
 #
-#     existing_settings.merge(new_settings).to_json
+#     existing.merge(incoming).to_json
 #   rescue JSON::ParserError
 #     incoming_settings
 #   end
-
-# ============================================================================
-# APPROACH 2: Fix in the Model using a before_save callback
-# ============================================================================
 #
-# If you prefer the model to handle this automatically:
+#   def parse_settings(value)
+#     return {} if value.blank?
 #
-#   # app/models/school.rb
-#
-#   before_save :merge_settings, if: :settings_changed?
-#
-#   private
-#
-#   def merge_settings
-#     return unless settings_changed?
-#
-#     old_settings = settings_was.is_a?(String) ? JSON.parse(settings_was) : (settings_was || {})
-#     new_settings = settings.is_a?(String) ? JSON.parse(settings) : (settings || {})
-#
-#     self.settings = old_settings.merge(new_settings).to_json
-#   rescue JSON::ParserError
-#     # If parsing fails, keep the incoming settings as-is
+#     case value
+#     when String then JSON.parse(value)
+#     when Hash   then value.to_h
+#     else {}
+#     end
 #   end
 
-
-# ============================================================================
-# IMPLEMENTATION: Controller concern for merging school settings
-# ============================================================================
+# =============================================================================
+# IMPLEMENTATION: Reusable controller concern
+# =============================================================================
+#
+# Alternatively, extract the merge logic into a concern that can be included
+# in any controller that touches school settings:
 
 module Admin
   module SchoolSettingsMerger
@@ -108,9 +116,9 @@ module Admin
 
     # Merges incoming settings with existing settings to prevent data loss.
     #
-    # This method ensures that when a subset of settings is sent from the
-    # frontend (e.g., only title and description), other existing settings
-    # (e.g., generate_learner_invoices) are not overwritten/lost.
+    # When the frontend sends only a subset of settings keys (e.g., title
+    # and description but not generate_learner_invoices), existing keys in
+    # the database are preserved.
     #
     # @param school [School] the school record with existing settings
     # @param incoming_settings [String, Hash] the new settings from params
@@ -144,6 +152,14 @@ module Admin
 
     # Processes school_params to merge settings before saving.
     # Call this in your update action instead of using school_params directly.
+    #
+    # Usage:
+    #   def update
+    #     @school = School.find(params[:id])
+    #     if @school.update(school_params_with_merged_settings(@school))
+    #       ...
+    #     end
+    #   end
     #
     # @param school [School] the school record being updated
     # @return [ActionController::Parameters] params with merged settings
